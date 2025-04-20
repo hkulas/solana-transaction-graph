@@ -1,0 +1,5 @@
+# macOS metadata
+.DS_Store
+
+# Netlify build‑artifact (if any)
+.netlify/
