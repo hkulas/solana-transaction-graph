@@ -3,32 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <title>Solana Transaction Graph</title>
-  <script src="https://unpkg.com/vis-network@9.1.0/standalone/umd/vis-network.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/standalone/umd/vis-network.min.js"></script>
   <style>
-    body {
-      font-family: sans-serif;
-      margin: 0;
-      padding: 20px;
-      background: #f9f9f9;
-    }
-    #controls {
-      margin-bottom: 10px;
-    }
-    #addr {
-      width: 320px;
-      padding: 6px;
-      font-size: 1rem;
-    }
-    #go {
-      padding: 6px 12px;
-      font-size: 1rem;
-    }
-    #network {
-      width: 100%;
-      height: 80vh;
-      border: 1px solid #ccc;
-      background: #fff;
-    }
+    body { font-family: sans-serif; margin:0; padding:20px; background:#f9f9f9 }
+    #controls { margin-bottom:10px }
+    #addr { width:400px; padding:6px; font-size:1rem }
+    #go   { padding:6px 12px; font-size:1rem }
+    #network { width:100%; height:80vh; border:1px solid #ccc; background:#fff }
   </style>
 </head>
 <body>
@@ -39,104 +20,108 @@
   <div id="network"></div>
 
   <script>
-  async function rpc(method, params) {
-    const res = await fetch("/.netlify/functions/proxy", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ method, params })
-    });
-    const j = await res.json();
-    if (j.error) throw j.error;
-    return j.result;
-  }
+    const PROXY = "/.netlify/functions/proxy";
 
-  function abbreviate(addr) {
-    return addr.slice(0,6) + "…" + addr.slice(-6);
-  }
+    async function rpc(method, params) {
+      const res = await fetch(PROXY, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method, params })
+      });
+      if (!res.ok) throw new Error(`${method} failed: ${res.status}`);
+      const j = await res.json();
+      if (j.error) throw j.error;
+      return j.result;
+    }
 
-  async function draw(addr) {
-    const container = document.getElementById("network");
-    container.innerHTML = ""; h
+    function abbreviate(addr) {
+      return addr.slice(0,6) + "…" + addr.slice(-6);
+    }
 
-    try {
-      const sigInfos = await rpc("getSignaturesForAddress", [addr, { limit: 100 }]);
-      const sigs = sigInfos.map(s => s.signature);
+    async function draw(addr) {
+      const container = document.getElementById("network");
+      container.innerHTML = "";
+      console.clear();
+      console.log("▶️ Drawing for:", addr);
 
-      const txPromises = sigs.map(sig =>
-        rpc("getTransaction", [sig, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }])
-      );
-      const txs = await Promise.all(txPromises);
+      let sigs;
+      try {
+        sigs = await rpc("getSignaturesForAddress", [addr, { limit: 20 }]);
+      } catch (e) {
+        return alert("Error fetching signatures:\n" + e);
+      }
+      console.log(`↪️ got ${sigs.length} signatures`);
 
-      const nodesSeen = new Set();
-      nodesSeen.add(addr);
+      const nodes = { [addr]: { id: addr, label: abbreviate(addr), color: "#FFD54F", size:30 } };
       const edges = [];
 
-      txs.forEach(tx => {
-        if (!tx || !tx.transaction) return;
-        const instrs = tx.transaction.message.instructions || [];
-        instrs.forEach(instr => {
-          const p = instr.parsed;
-          if (p && p.type === "transfer") {
-            const src = p.info.source, dst = p.info.destination;
-            if (src !== addr && dst !== addr) return;  // only include edges touching center
-            nodesSeen.add(src);
-            nodesSeen.add(dst);
-            edges.push({ from: src, to: dst });
-          }
-        });
-      });
-
-      const visNodes = Array.from(nodesSeen).map(id => ({
-        id,
-        label: id === addr ? id : abbreviate(id),
-        title: id,
-        color: id === addr ? "red" : "lightblue",
-        size: id === addr ? 30 : 15
-      }));
-      const edgeMap = {};
-      edges.forEach(e => {
-        const key = e.from + "->" + e.to;
-        edgeMap[key] = (edgeMap[key] || 0) + 1;
-      });
-      const visEdges = Object.entries(edgeMap).map(([key, w]) => {
-        const [from, to] = key.split("->");
-        return {
-          from, to,
-          color: to === addr ? "green" : "red",
-          arrows: "to",
-          value: w
-        };
-      });
-
-      const data = { nodes: visNodes, edges: visEdges };
-      const options = {
-        physics: {
-          barnesHut: {
-            gravitationalConstant: -3000,
-            springLength: 200,
-            springConstant: 0.05
-          }
+      for (let i = 0; i < sigs.length; i++) {
+        const sig = sigs[i].signature;
+        let tx;
+        try {
+          tx = await rpc("getTransaction", [sig, { encoding:"jsonParsed", maxSupportedTransactionVersion:0 }]);
+        } catch (e) {
+          console.warn("⚠️ tx fetch failed:", sig, e);
+          continue;
         }
-      };
-      const network = new vis.Network(container, data, options);
+        if (!tx?.transaction) continue;
 
-      network.on("click", params => {
-        if (params.nodes.length) {
-          const nodeId = params.nodes[0];
-          window.open("https://explorer.solana.com/address/" + nodeId, "_blank");
+        const instrs = [
+          ...(tx.transaction.message.instructions || []),
+          ...((tx.meta?.innerInstructions||[]).flatMap(x => x.instructions))
+        ];
+        for (const ix of instrs) {
+          if (ix.parsed?.type !== "transfer") continue;
+          const { source, destination, lamports } = ix.parsed.info;
+          if (![source,destination].includes(addr)) continue;
+
+          [source,destination].forEach(a=>{
+            if (!nodes[a]) {
+              nodes[a] = { id:a, label:abbreviate(a), color:"#90CAF9", size:15 };
+            }
+          });
+
+          const sol = lamports/1e9;
+          edges.push({
+            from: source,
+            to: destination,
+            title: sol.toFixed(4)+" SOL",
+            arrows: "to",
+            color: destination===addr?"green":"red",
+            width: Math.sqrt(sol)*2 + 1
+          });
+        }
+
+        await new Promise(r=>setTimeout(r,200));
+        console.log(`✔️ ${i+1}/${sigs.length}`);
+      }
+
+      if (!edges.length) {
+        container.innerHTML = "<p>No SOL transfers found.</p>";
+        return;
+      }
+
+      const network = new vis.Network(
+        container,
+        { nodes: Object.values(nodes), edges },
+        {
+          physics: { barnesHut: { gravitationalConstant:-2000, springLength:150 } },
+          edges: { smooth:true }
+        }
+      );
+      network.on("click", ev => {
+        if (ev.nodes.length) {
+          window.open("https://explorer.solana.com/address/"+ev.nodes[0], "_blank");
         }
       });
 
-    } catch (err) {
-      console.error(err);
-      alert("Error: " + (err.message||err));
+      console.log("✅ Graph drawn");
     }
-  }
 
-  document.getElementById("go").onclick = () => {
-    const a = document.getElementById("addr").value.trim();
-    if (a) draw(a);
-  };
+    document.getElementById("go").onclick = () => {
+      const a = document.getElementById("addr").value.trim();
+      if (a) draw(a);
+    };
   </script>
 </body>
 </html>
