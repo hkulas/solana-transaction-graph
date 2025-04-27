@@ -46,7 +46,7 @@
 
       let sigs;
       try {
-        sigs = await rpc("getSignaturesForAddress", [addr, { limit: 20 }]);
+        sigs = await rpc("getSignaturesForAddress", [addr, { limit: 100 }]);
       } catch (e) {
         return alert("Error fetching signatures:\n" + e);
       }
